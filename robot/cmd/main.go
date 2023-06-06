@@ -284,7 +284,7 @@ func clientLogic(account string, session *net.Session) {
 			case cmd.PlayerDataNotify:
 				playerdata := protoMsg.PayloadMessage.(*proto.PlayerDataNotify)
 				oldnickname = playerdata.NickName
-				logger.Debug("old game nickname:%v", oldnickname)
+				logger.Info("old game nickname:%v", oldnickname)
 			//发送改名请求
 			session.SendMsg(cmd.SetPlayerNameReq, &proto.SetPlayerNameReq{
 				NickName:        config.GetConfig().Hk4eRobot.NickName,
@@ -292,7 +292,7 @@ func clientLogic(account string, session *net.Session) {
 			case cmd.SetPlayerNameRsp:
 				gamename := protoMsg.PayloadMessage.(*proto.SetPlayerNameRsp)
 				if gamename != nil {
-					logger.Debug("The nickname of the game has been changed to: %v, account: %v", gamename, account)
+					logger.Info("The nickname of the game has been changed to: %v, account: %v", gamename, account)
 					continue
 				}
 			case cmd.SceneEntityAppearNotify:

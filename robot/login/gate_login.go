@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"strconv"
+	"fmt"
 
 	"hk4e/common/region"
 	"hk4e/pkg/endec"
@@ -62,6 +63,9 @@ func GateLogin(dispatchInfo *DispatchInfo, accountInfo *AccountInfo, keyId strin
 		return nil, errors.New("recv pkt is not GetPlayerTokenRsp")
 	}
 	getPlayerTokenRsp := protoMsg.PayloadMessage.(*proto.GetPlayerTokenRsp)
+	if getPlayerTokenRsp.Retcode!= 0 {
+		return nil, errors.New(fmt.Sprintf("gate login error, retCode: %v", getPlayerTokenRsp.Retcode))
+	}
 	logger.Info("gate login ok, uid: %v", getPlayerTokenRsp.Uid)
 	// XOR密钥切换
 	seedEnc, err := base64.StdEncoding.DecodeString(getPlayerTokenRsp.ServerRandKey)
