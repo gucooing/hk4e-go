@@ -213,7 +213,7 @@ func clientLogic(account string, session *net.Session) {
 						if clientProtoObj == nil {
 							continue
 						}
-						_, err := object.CopyProtoBufSameField(clientProtoObj, combatInvocationsNotify)
+						err := object.CopyProtoBufSameField(clientProtoObj, combatInvocationsNotify)
 						if err != nil {
 							continue
 						}
