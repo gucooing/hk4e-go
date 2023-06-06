@@ -59,12 +59,13 @@ func main() {
 			wg := new(sync.WaitGroup)
 			wg.Add(dosBatchNum)
 			for j := 0; j < dosBatchNum; j++ {
-				go httpLogin(config.GetConfig().Hk4eRobot.Account+"_"+strconv.Itoa(i+j), dispatchInfo, wg)
+				go httpLogin(config.GetConfig().Hk4eRobot.Account+"_"+strconv.Itoa(i+j), dispatchInfo, wg, i+j)
 			}
 			wg.Wait()
+			time.Sleep(time.Second * 10)
 		}
 	} else {
-		httpLogin(config.GetConfig().Hk4eRobot.Account, dispatchInfo, nil)
+		httpLogin(config.GetConfig().Hk4eRobot.Account, dispatchInfo, nil, 0 )
 	}
 
 	c := make(chan os.Signal, 1)
@@ -83,16 +84,23 @@ func main() {
 	}
 }
 
-func httpLogin(account string, dispatchInfo *login.DispatchInfo, wg *sync.WaitGroup) {
+func httpLogin(account string, dispatchInfo *login.DispatchInfo, wg *sync.WaitGroup, i int) {
 	defer func() {
 		if config.GetConfig().Hk4eRobot.DosEnable {
 			wg.Done()
 		}
 	}()
+	/*
 	accountInfo, err := login.AccountLogin(config.GetConfig().Hk4eRobot.LoginSdkUrl, account, config.GetConfig().Hk4eRobot.Password)
 	if err != nil {
 		logger.Error("account login error: %v", err)
 		return
+	}
+	*/
+	accountInfo := &login.AccountInfo{
+		AccountId:  config.GetConfig().Hk4eRobot.AccountId + uint32(i),
+	    Token:      "114514",
+	    ComboToken: "114514",
 	}
 	logger.Info("robot http login ok, account: %v", account)
 	go func() {
@@ -138,6 +146,8 @@ func gateLogin(account string, dispatchInfo *login.DispatchInfo, accountInfo *lo
 	})
 	clientLogic(account, session)
 }
+
+var oldnickname string
 
 func clientLogic(account string, session *net.Session) {
 	ticker := time.NewTicker(time.Second)
@@ -203,7 +213,7 @@ func clientLogic(account string, session *net.Session) {
 						if clientProtoObj == nil {
 							continue
 						}
-						err := object.CopyProtoBufSameField(clientProtoObj, combatInvocationsNotify)
+						_, err := object.CopyProtoBufSameField(clientProtoObj, combatInvocationsNotify)
 						if err != nil {
 							continue
 						}
@@ -269,6 +279,21 @@ func clientLogic(account string, session *net.Session) {
 				session.SendMsg(cmd.PostEnterSceneReq, &proto.PostEnterSceneReq{EnterSceneToken: ntf.EnterSceneToken})
 				if config.GetConfig().Hk4eRobot.DosLoopLogin {
 					return
+				}
+			//接收旧昵称
+			case cmd.PlayerDataNotify:
+				playerdata := protoMsg.PayloadMessage.(*proto.PlayerDataNotify)
+				oldnickname = playerdata.NickName
+				logger.Debug("old game nickname:%v", oldnickname)
+			//发送改名请求
+			session.SendMsg(cmd.SetPlayerNameReq, &proto.SetPlayerNameReq{
+				NickName:        config.GetConfig().Hk4eRobot.NickName,
+			})
+			case cmd.SetPlayerNameRsp:
+				gamename := protoMsg.PayloadMessage.(*proto.SetPlayerNameRsp)
+				if gamename != nil {
+					logger.Debug("The nickname of the game has been changed to: %v, account: %v", gamename, account)
+					continue
 				}
 			case cmd.SceneEntityAppearNotify:
 				ntf := protoMsg.PayloadMessage.(*proto.SceneEntityAppearNotify)

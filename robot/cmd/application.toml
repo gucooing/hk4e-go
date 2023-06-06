@@ -25,3 +25,5 @@ dos_loop_login = false # 压力测试是否循环登录退出
 client_move_enable = false # 是否开启客户端模拟移动
 client_move_speed = 10 # 客户端模拟移动速度
 client_move_range_ext = 100 # 客户端模拟移动区域半径
+nick_name = "" # 修改登录用户名
+account_id = 10000 # 暴力登录初始账号id
