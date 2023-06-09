@@ -56,17 +56,20 @@ const (
 	ServerUserMpRsp                          // 跨服多人世界相关响应
 	ServerChatMsgNotify                      // 跨服玩家聊天消息通知
 	ServerAddFriendNotify                    // 跨服添加好友通知
+	ServerRobotConnFwdSrvNotify              // robot连接转发服务器通知
 )
 
 type ServerMsg struct {
-	AnticheatServerAppId string
-	UserId               uint32
-	IsOnline             bool
-	GameServerAppId      string
-	JoinHostUserId       uint32
-	UserMpInfo           *UserMpInfo
-	ChatMsgInfo          *ChatMsgInfo
-	AddFriendInfo        *AddFriendInfo
+	AnticheatServerAppId  string
+	UserId                uint32
+	IsOnline              bool
+	GameServerAppId       string
+	JoinHostUserId        uint32
+	UserMpInfo            *UserMpInfo
+	ChatMsgInfo           *ChatMsgInfo
+	AddFriendInfo         *AddFriendInfo
+	GetPlayerTokenReqData []byte
+	GetPlayerTokenRspData []byte
 }
 
 type OriginInfo struct {

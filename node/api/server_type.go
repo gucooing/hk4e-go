@@ -6,4 +6,5 @@ const (
 	ANTICHEAT   = "ANTICHEAT"
 	PATHFINDING = "PATHFINDING"
 	NODE        = "NODE"
+	ROBOT       = "ROBOT"
 )
