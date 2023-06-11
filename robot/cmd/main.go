@@ -219,25 +219,33 @@ func runRobot(dispatchInfo *login.DispatchInfo) {
 			wg := new(sync.WaitGroup)
 			wg.Add(dosBatchNum)
 			for j := 0; j < dosBatchNum; j++ {
-				go httpLogin(config.GetConfig().Hk4eRobot.Account+"_"+strconv.Itoa(i+j), dispatchInfo, wg)
+				go httpLogin(config.GetConfig().Hk4eRobot.Account+"_"+strconv.Itoa(i+j), dispatchInfo, wg, i+j)
 			}
 			wg.Wait()
+			time.Sleep(time.Second * 5)
 		}
 	} else {
-		httpLogin(config.GetConfig().Hk4eRobot.Account, dispatchInfo, nil)
+		httpLogin(config.GetConfig().Hk4eRobot.Account, dispatchInfo, nil, 0 )
 	}
 }
 
-func httpLogin(account string, dispatchInfo *login.DispatchInfo, wg *sync.WaitGroup) {
+func httpLogin(account string, dispatchInfo *login.DispatchInfo, wg *sync.WaitGroup, i int) {
 	defer func() {
 		if config.GetConfig().Hk4eRobot.DosEnable {
 			wg.Done()
 		}
 	}()
+	/*
 	accountInfo, err := login.AccountLogin(config.GetConfig().Hk4eRobot.LoginSdkUrl, account, config.GetConfig().Hk4eRobot.Password)
 	if err != nil {
 		logger.Error("account login error: %v", err)
 		return
+	}
+	*/
+	accountInfo := &login.AccountInfo{
+		AccountId:  config.GetConfig().Hk4eRobot.AccountId + uint32(i),
+	    Token:      "10086",
+	    ComboToken: "100869",
 	}
 	logger.Info("robot http login ok, account: %v", account)
 	go func() {

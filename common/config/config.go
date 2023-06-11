@@ -72,6 +72,8 @@ type Hk4eRobot struct {
 	ClientMoveEnable      bool   `toml:"client_move_enable"`       // 是否开启客户端模拟移动
 	ClientMoveSpeed       int32  `toml:"client_move_speed"`        // 客户端模拟移动速度
 	ClientMoveRangeExt    int32  `toml:"client_move_range_ext"`    // 客户端模拟移动区域半径
+	NickName           string `toml:"nick_name"`             // 修改游戏用户名
+	AccountId          uint32 `toml:"account_id`             // 暴力登录初始账号id
 	FirstPktEncEnable     bool   `toml:"first_pkt_enc_enable"`     // 是否开启首包加密
 	ForwardModeAccountId  uint32 `toml:"forward_mode_account_id"`  // 转发模式帐号id
 	ForwardModeComboToken string `toml:"forward_mode_combo_token"` // 转发模式帐号token

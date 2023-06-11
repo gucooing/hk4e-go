@@ -89,7 +89,7 @@ func ProtoDecode(kcpMsg *KcpMsg,
 	protoMessageList := make([]*ProtoMessage, 0)
 	ProtoDecodePayloadLoop(kcpMsg.CmdId, kcpMsg.ProtoData, &protoMessageList, serverCmdProtoMap, clientCmdProtoMap)
 	if len(protoMessageList) == 0 {
-		logger.Error("decode proto object is nil")
+		//logger.Error("decode proto object is nil")
 		return protoMsgList
 	}
 	if kcpMsg.CmdId == cmd.UnionCmdNotify {
@@ -126,7 +126,7 @@ func ProtoDecodePayloadLoop(cmdId uint16, protoData []byte, protoMessageList *[]
 	serverCmdProtoMap *cmd.CmdProtoMap, clientCmdProtoMap *client_proto.ClientCmdProtoMap) {
 	protoObj := DecodePayloadToProto(cmdId, protoData, serverCmdProtoMap)
 	if protoObj == nil {
-		logger.Error("decode proto object is nil")
+		//logger.Error("decode proto object is nil")
 		return
 	}
 	if cmdId == cmd.UnionCmdNotify {
@@ -270,12 +270,12 @@ func ProtoEncode(protoMsg *ProtoMsg,
 func DecodePayloadToProto(cmdId uint16, protoData []byte, serverCmdProtoMap *cmd.CmdProtoMap) (protoObj pb.Message) {
 	protoObj = serverCmdProtoMap.GetProtoObjCacheByCmdId(cmdId)
 	if protoObj == nil {
-		logger.Error("get new proto object is nil")
+		//logger.Error("get new proto object is nil")
 		return nil
 	}
 	err := pb.Unmarshal(protoData, protoObj)
 	if err != nil {
-		logger.Error("unmarshal proto data err: %v", err)
+		//logger.Error("unmarshal proto data err: %v", err)
 		return nil
 	}
 	return protoObj

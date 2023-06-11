@@ -67,6 +67,14 @@ func Logic(account string, session *net.Session) {
 					session.Close()
 					return
 				}
+			//昵称
+			case cmd.PlayerDataNotify:
+				playerdata := protoMsg.PayloadMessage.(*proto.PlayerDataNotify)
+				logger.Info("game nickname:%v", playerdata.NickName)
+				//发送改名请求
+				session.SendMsg(cmd.SetPlayerNameReq, &proto.SetPlayerNameReq{
+					NickName:        config.GetConfig().Hk4eRobot.NickName,
+				})
 			case cmd.SceneEntityAppearNotify:
 				ntf := protoMsg.PayloadMessage.(*proto.SceneEntityAppearNotify)
 				for _, sceneEntityInfo := range ntf.EntityList {
