@@ -101,7 +101,6 @@ func (k *KcpConnectManager) run() {
 	if k.getGateMaxVersion() < 370 {
 		k.dispatchKey = regionEc2b.XorKey()
 	} else {
-		// 全部填充为0 不然会出问题
 		k.dispatchKey = make([]byte, 4096)
 	}
 	// kcp
@@ -113,7 +112,9 @@ func (k *KcpConnectManager) run() {
 	}
 	go k.enetHandle(listener)
 	go k.eventHandle()
-	go k.sendMsgHandle()
+	if !config.GetConfig().Hk4e.ForwardModeEnable {
+		go k.forwardServerMsgToClientHandle()
+	}
 	go k.acceptHandle(listener)
 	go k.gateNetInfo()
 	k.syncGlobalGsOnlineMap()
@@ -171,6 +172,13 @@ func (k *KcpConnectManager) acceptHandle(listener *kcp.Listener) {
 			_ = conn.Close()
 			continue
 		}
+		if config.GetConfig().Hk4e.ForwardModeEnable {
+			clientConnNum := atomic.LoadInt32(&CLIENT_CONN_NUM)
+			if clientConnNum != 0 {
+				_ = conn.Close()
+				continue
+			}
+		}
 		conn.SetACKNoDelay(true)
 		conn.SetWriteDelay(false)
 		conn.SetWindowSize(255, 255)
@@ -188,10 +196,21 @@ func (k *KcpConnectManager) acceptHandle(listener *kcp.Listener) {
 			gsServerAppId:          "",
 			anticheatServerAppId:   "",
 			pathfindingServerAppId: "",
+			robotServerAppId:       "",
 			useMagicSeed:           false,
+		}
+		if config.GetConfig().Hk4e.ForwardModeEnable {
+			robotServerAppId, err := k.discovery.GetServerAppId(context.TODO(), &api.GetServerAppIdReq{
+				ServerType: api.ROBOT,
+			})
+			if err != nil {
+				logger.Error("get robot server appid error: %v", err)
+			}
+			session.robotServerAppId = robotServerAppId.AppId
 		}
 		go k.recvHandle(session)
 		go k.sendHandle(session)
+		go k.forwardRobotMsgToClientHandle(session)
 		// 连接建立成功通知
 		k.kcpEventOutput <- &KcpEvent{
 			ConvId:       convId,
@@ -302,6 +321,7 @@ type Session struct {
 	gsServerAppId          string
 	anticheatServerAppId   string
 	pathfindingServerAppId string
+	robotServerAppId       string
 	useMagicSeed           bool
 }
 
@@ -340,7 +360,11 @@ func (k *KcpConnectManager) recvHandle(session *Session) {
 		for _, v := range kcpMsgList {
 			protoMsgList := ProtoDecode(v, k.serverCmdProtoMap, k.clientCmdProtoMap)
 			for _, vv := range protoMsgList {
-				k.recvMsgHandle(vv, session)
+				if config.GetConfig().Hk4e.ForwardModeEnable {
+					k.forwardClientMsgToRobotHandle(vv, session)
+				} else {
+					k.forwardClientMsgToServerHandle(vv, session)
+				}
 			}
 		}
 	}

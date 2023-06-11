@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,20 +12,22 @@ import (
 	"syscall"
 	"time"
 
-	hk4egatenet "hk4e/gate/net"
-	"hk4e/pkg/endec"
-	"hk4e/pkg/object"
-	"hk4e/pkg/random"
-	"hk4e/robot/net"
-
-	pb "google.golang.org/protobuf/proto"
-
 	"hk4e/common/config"
+	"hk4e/common/mq"
+	"hk4e/common/rpc"
+	"hk4e/node/api"
+	"hk4e/pkg/endec"
 	"hk4e/pkg/logger"
 	"hk4e/protocol/cmd"
 	"hk4e/protocol/proto"
+	"hk4e/robot/client"
 	"hk4e/robot/login"
+	"hk4e/robot/net"
+
+	pb "google.golang.org/protobuf/proto"
 )
+
+var APPID string
 
 func main() {
 	config.InitConfig("application.toml")
@@ -49,23 +51,52 @@ func main() {
 		config.GetConfig().Hk4eRobot.KeyId)
 	if err != nil {
 		logger.Error("get dispatch info error: %v", err)
-		time.Sleep(time.Second)
 		return
 	}
 
-	if config.GetConfig().Hk4eRobot.DosEnable {
-		dosBatchNum := int(config.GetConfig().Hk4eRobot.DosBatchNum)
-		for i := 0; i < int(config.GetConfig().Hk4eRobot.DosTotalNum); i += dosBatchNum {
-			wg := new(sync.WaitGroup)
-			wg.Add(dosBatchNum)
-			for j := 0; j < dosBatchNum; j++ {
-				go httpLogin(config.GetConfig().Hk4eRobot.Account+"_"+strconv.Itoa(i+j), dispatchInfo, wg, i+j)
-			}
-			wg.Wait()
-			time.Sleep(time.Second * 10)
+	if config.GetConfig().Hk4e.ForwardModeEnable {
+		// natsrpc client
+		discoveryClient, err := rpc.NewDiscoveryClient()
+		if err != nil {
+			logger.Error("find discovery service error: %v", err)
+			return
 		}
+
+		// 注册到节点服务器
+		rsp, err := discoveryClient.RegisterServer(context.TODO(), &api.RegisterServerReq{
+			ServerType: api.ROBOT,
+		})
+		if err != nil {
+			logger.Error("register to node server error: %v", err)
+			return
+		}
+		APPID = rsp.GetAppId()
+		go func() {
+			ticker := time.NewTicker(time.Second * 15)
+			for {
+				<-ticker.C
+				_, err := discoveryClient.KeepaliveServer(context.TODO(), &api.KeepaliveServerReq{
+					ServerType: api.ROBOT,
+					AppId:      APPID,
+				})
+				if err != nil {
+					logger.Error("keepalive error: %v", err)
+				}
+			}
+		}()
+		defer func() {
+			_, _ = discoveryClient.CancelServer(context.TODO(), &api.CancelServerReq{
+				ServerType: api.ROBOT,
+				AppId:      APPID,
+			})
+		}()
+
+		messageQueue := mq.NewMessageQueue(api.ROBOT, APPID, discoveryClient)
+		defer messageQueue.Close()
+
+		runForward(dispatchInfo, messageQueue)
 	} else {
-		httpLogin(config.GetConfig().Hk4eRobot.Account, dispatchInfo, nil, 0 )
+		runRobot(dispatchInfo)
 	}
 
 	c := make(chan os.Signal, 1)
@@ -84,6 +115,120 @@ func main() {
 	}
 }
 
+func runForward(dispatchInfo *login.DispatchInfo, messageQueue *mq.MessageQueue) {
+	var gateAppId = ""
+	var session *net.Session = nil
+
+	for {
+		netMsg := <-messageQueue.GetNetMsg()
+		if netMsg.MsgType != mq.MsgTypeServer {
+			continue
+		}
+		if netMsg.EventId != mq.ServerRobotConnFwdSrvNotify {
+			continue
+		}
+		if netMsg.OriginServerType != api.GATE {
+			continue
+		}
+		serverMsg := netMsg.ServerMsg
+		gateAppId = netMsg.OriginServerAppId
+		req := new(proto.GetPlayerTokenReq)
+		err := pb.Unmarshal(serverMsg.GetPlayerTokenReqData, req)
+		if err != nil {
+			logger.Error("parse GetPlayerTokenReq error: %v", err)
+			return
+		}
+		var rsp *proto.GetPlayerTokenRsp = nil
+		session, err, rsp = login.GateLogin(dispatchInfo, &login.AccountInfo{
+			AccountId:  config.GetConfig().Hk4eRobot.ForwardModeAccountId,
+			ComboToken: config.GetConfig().Hk4eRobot.ForwardModeComboToken,
+		}, config.GetConfig().Hk4eRobot.KeyId, req)
+		if err != nil {
+			logger.Error("gate login error: %v", err)
+			return
+		}
+		data, err := pb.Marshal(rsp)
+		if err != nil {
+			logger.Error("build GetPlayerTokenRsp error: %v", err)
+			return
+		}
+		messageQueue.SendToGate(gateAppId, &mq.NetMsg{
+			MsgType: mq.MsgTypeServer,
+			EventId: mq.ServerRobotConnFwdSrvNotify,
+			ServerMsg: &mq.ServerMsg{
+				GetPlayerTokenReqData: serverMsg.GetPlayerTokenReqData,
+				GetPlayerTokenRspData: data,
+			},
+		})
+		logger.Info("robot gate login ok")
+		break
+	}
+
+	go func() {
+		for {
+			select {
+			case netMsg := <-messageQueue.GetNetMsg():
+				if netMsg.MsgType != mq.MsgTypeGame {
+					continue
+				}
+				if netMsg.EventId != mq.NormalMsg {
+					continue
+				}
+				if netMsg.OriginServerType != api.GATE {
+					continue
+				}
+				gameMsg := netMsg.GameMsg
+				if gameMsg.CmdId == cmd.PlayerLoginReq {
+					req := gameMsg.PayloadMessage.(*proto.PlayerLoginReq)
+					req.Token = config.GetConfig().Hk4eRobot.ForwardModeComboToken
+					gameMsg.PayloadMessage = req
+				}
+				session.SendMsg(gameMsg.CmdId, gameMsg.PayloadMessage, gameMsg.ClientSeq)
+			case protoMsg := <-session.RecvChan:
+				gameMsg := new(mq.GameMsg)
+				gameMsg.UserId = session.Uid
+				gameMsg.CmdId = protoMsg.CmdId
+				if protoMsg.HeadMessage != nil {
+					gameMsg.ClientSeq = protoMsg.HeadMessage.ClientSequenceId
+				}
+				// 在这里直接序列化成二进制数据 防止发送的消息内包含各种游戏数据指针 而造成并发读写的问题
+				payloadMessageData, err := pb.Marshal(protoMsg.PayloadMessage)
+				if err != nil {
+					logger.Error("parse payload msg to bin error: %v", err)
+					continue
+				}
+				gameMsg.PayloadMessageData = payloadMessageData
+				messageQueue.SendToGate(gateAppId, &mq.NetMsg{
+					MsgType: mq.MsgTypeGame,
+					EventId: mq.NormalMsg,
+					GameMsg: gameMsg,
+				})
+			case <-session.DeadEvent:
+				logger.Info("robot exit")
+				close(session.SendChan)
+				return
+			}
+		}
+	}()
+}
+
+func runRobot(dispatchInfo *login.DispatchInfo) {
+	if config.GetConfig().Hk4eRobot.DosEnable {
+		dosBatchNum := int(config.GetConfig().Hk4eRobot.DosBatchNum)
+		for i := 0; i < int(config.GetConfig().Hk4eRobot.DosTotalNum); i += dosBatchNum {
+			wg := new(sync.WaitGroup)
+			wg.Add(dosBatchNum)
+			for j := 0; j < dosBatchNum; j++ {
+				go httpLogin(config.GetConfig().Hk4eRobot.Account+"_"+strconv.Itoa(i+j), dispatchInfo, wg, i+j)
+			}
+			wg.Wait()
+			time.Sleep(time.Second * 5)
+		}
+	} else {
+		httpLogin(config.GetConfig().Hk4eRobot.Account, dispatchInfo, nil, 0 )
+	}
+}
+
 func httpLogin(account string, dispatchInfo *login.DispatchInfo, wg *sync.WaitGroup, i int) {
 	defer func() {
 		if config.GetConfig().Hk4eRobot.DosEnable {
@@ -99,8 +244,8 @@ func httpLogin(account string, dispatchInfo *login.DispatchInfo, wg *sync.WaitGr
 	*/
 	accountInfo := &login.AccountInfo{
 		AccountId:  config.GetConfig().Hk4eRobot.AccountId + uint32(i),
-	    Token:      "114514",
-	    ComboToken: "114514",
+	    Token:      "10086",
+	    ComboToken: "100869",
 	}
 	logger.Info("robot http login ok, account: %v", account)
 	go func() {
@@ -116,7 +261,7 @@ func httpLogin(account string, dispatchInfo *login.DispatchInfo, wg *sync.WaitGr
 }
 
 func gateLogin(account string, dispatchInfo *login.DispatchInfo, accountInfo *login.AccountInfo) {
-	session, err := login.GateLogin(dispatchInfo, accountInfo, config.GetConfig().Hk4eRobot.KeyId)
+	session, err, _ := login.GateLogin(dispatchInfo, accountInfo, config.GetConfig().Hk4eRobot.KeyId, nil)
 	if err != nil {
 		logger.Error("gate login error: %v", err)
 		return
@@ -143,170 +288,6 @@ func gateLogin(account string, dispatchInfo *login.DispatchInfo, accountInfo *lo
 		SecurityCmdReply:      session.SecurityCmdBuffer,
 		SecurityLibraryMd5:    "574a507ffee2eb6f997d11f71c8ae1fa",
 		Token:                 accountInfo.ComboToken,
-	})
-	clientLogic(account, session)
-}
-
-var oldnickname string
-
-func clientLogic(account string, session *net.Session) {
-	ticker := time.NewTicker(time.Second)
-	tickCounter := uint64(0)
-	pingSeq := uint32(0)
-	enterSceneDone := false
-	sceneBeginTime := uint32(0)
-	bornPos := new(proto.Vector)
-	currPos := new(proto.Vector)
-	avatarEntityId := uint32(0)
-	moveRot := random.GetRandomFloat32(0.0, 359.9)
-	moveReliableSeq := uint32(0)
-	for {
-		select {
-		case <-ticker.C:
-			tickCounter++
-			if config.GetConfig().Hk4eRobot.ClientMoveEnable {
-				if enterSceneDone {
-					for {
-						dx := float32(float64(config.GetConfig().Hk4eRobot.ClientMoveSpeed) * math.Cos(float64(moveRot/360.0*2*math.Pi)))
-						dz := float32(float64(config.GetConfig().Hk4eRobot.ClientMoveSpeed) * math.Sin(float64(moveRot/360.0*2*math.Pi)))
-						if currPos.X-dx > bornPos.X+float32(config.GetConfig().Hk4eRobot.ClientMoveRangeExt) ||
-							currPos.Z-dz > bornPos.Z+float32(config.GetConfig().Hk4eRobot.ClientMoveRangeExt) ||
-							currPos.X-dx < bornPos.X-float32(config.GetConfig().Hk4eRobot.ClientMoveRangeExt) ||
-							currPos.Z-dz < bornPos.Z-float32(config.GetConfig().Hk4eRobot.ClientMoveRangeExt) {
-							moveRot = random.GetRandomFloat32(0.0, 359.9)
-							continue
-						}
-						currPos.X -= dx
-						currPos.Z -= dz
-						break
-					}
-					moveReliableSeq += 100
-					entityMoveInfo := &proto.EntityMoveInfo{
-						EntityId: avatarEntityId,
-						MotionInfo: &proto.MotionInfo{
-							Pos:    currPos,
-							Rot:    &proto.Vector{X: 0.0, Y: moveRot, Z: 0.0},
-							Speed:  new(proto.Vector),
-							State:  proto.MotionState_MOTION_RUN,
-							RefPos: new(proto.Vector),
-						},
-						SceneTime:   uint32(time.Now().UnixMilli()) - sceneBeginTime,
-						ReliableSeq: moveReliableSeq,
-						IsReliable:  true,
-					}
-					logger.Debug("EntityMoveInfo: %v, account: %v", entityMoveInfo, account)
-					combatData, err := pb.Marshal(entityMoveInfo)
-					if err != nil {
-						logger.Error("marshal EntityMoveInfo error: %v, account: %v", err, account)
-						continue
-					}
-					combatInvocationsNotify := &proto.CombatInvocationsNotify{
-						InvokeList: []*proto.CombatInvokeEntry{{
-							CombatData:   combatData,
-							ForwardType:  proto.ForwardType_FORWARD_TO_ALL_EXCEPT_CUR,
-							ArgumentType: proto.CombatTypeArgument_ENTITY_MOVE,
-						}},
-					}
-					var combatInvocationsNotifyPb pb.Message = combatInvocationsNotify
-					if config.GetConfig().Hk4e.ClientProtoProxyEnable {
-						clientProtoObj := hk4egatenet.GetClientProtoObjByName("CombatInvocationsNotify", session.ClientCmdProtoMap)
-						if clientProtoObj == nil {
-							continue
-						}
-						err := object.CopyProtoBufSameField(clientProtoObj, combatInvocationsNotify)
-						if err != nil {
-							continue
-						}
-						hk4egatenet.ConvServerPbDataToClient(clientProtoObj, session.ClientCmdProtoMap)
-						combatInvocationsNotifyPb = clientProtoObj
-					}
-					body, err := pb.Marshal(combatInvocationsNotifyPb)
-					if err != nil {
-						logger.Error("marshal CombatInvocationsNotify error: %v, account: %v", err, account)
-						continue
-					}
-					unionCmdNotify := &proto.UnionCmdNotify{
-						CmdList: []*proto.UnionCmd{{
-							Body:      body,
-							MessageId: cmd.CombatInvocationsNotify,
-						}},
-					}
-					if config.GetConfig().Hk4e.ClientProtoProxyEnable {
-						unionCmdNotify.CmdList[0].MessageId = uint32(session.ClientCmdProtoMap.GetClientCmdIdByCmdName("CombatInvocationsNotify"))
-					}
-					session.SendMsg(cmd.UnionCmdNotify, unionCmdNotify)
-				}
-			}
-			if tickCounter%5 != 0 {
-				continue
-			}
-			pingSeq++
-			// 通过这个接口发消息给服务器
-			session.SendMsg(cmd.PingReq, &proto.PingReq{
-				ClientTime: uint32(time.Now().Unix()),
-				Seq:        pingSeq,
-			})
-		case protoMsg := <-session.RecvChan:
-			// 从这个管道接收服务器发来的消息
-			switch protoMsg.CmdId {
-			case cmd.PlayerLoginRsp:
-				rsp := protoMsg.PayloadMessage.(*proto.PlayerLoginRsp)
-				if rsp.Retcode != 0 {
-					logger.Error("login fail, retCode: %v, account: %v", rsp.Retcode, account)
-					return
-				}
-				logger.Info("robot gs login ok, account: %v", account)
-			case cmd.DoSetPlayerBornDataNotify:
-				session.SendMsg(cmd.SetPlayerBornDataReq, &proto.SetPlayerBornDataReq{
-					AvatarId: 10000007,
-					NickName: account,
-				})
-			case cmd.PlayerEnterSceneNotify:
-				ntf := protoMsg.PayloadMessage.(*proto.PlayerEnterSceneNotify)
-				bornPos.X, bornPos.Y, bornPos.Z = ntf.Pos.X, ntf.Pos.Y, ntf.Pos.Z
-				currPos.X, currPos.Y, currPos.Z = ntf.Pos.X, ntf.Pos.Y, ntf.Pos.Z
-				session.SendMsg(cmd.EnterSceneReadyReq, &proto.EnterSceneReadyReq{EnterSceneToken: ntf.EnterSceneToken})
-			case cmd.EnterSceneReadyRsp:
-				ntf := protoMsg.PayloadMessage.(*proto.EnterSceneReadyRsp)
-				session.SendMsg(cmd.SceneInitFinishReq, &proto.SceneInitFinishReq{EnterSceneToken: ntf.EnterSceneToken})
-			case cmd.SceneInitFinishRsp:
-				ntf := protoMsg.PayloadMessage.(*proto.SceneInitFinishRsp)
-				session.SendMsg(cmd.EnterSceneDoneReq, &proto.EnterSceneDoneReq{EnterSceneToken: ntf.EnterSceneToken})
-			case cmd.EnterSceneDoneRsp:
-				ntf := protoMsg.PayloadMessage.(*proto.EnterSceneDoneRsp)
-				enterSceneDone = true
-				sceneBeginTime = uint32(time.Now().UnixMilli())
-				session.SendMsg(cmd.PostEnterSceneReq, &proto.PostEnterSceneReq{EnterSceneToken: ntf.EnterSceneToken})
-				if config.GetConfig().Hk4eRobot.DosLoopLogin {
-					return
-				}
-			//接收旧昵称
-			case cmd.PlayerDataNotify:
-				playerdata := protoMsg.PayloadMessage.(*proto.PlayerDataNotify)
-				oldnickname = playerdata.NickName
-				logger.Info("old game nickname:%v", oldnickname)
-			//发送改名请求
-			session.SendMsg(cmd.SetPlayerNameReq, &proto.SetPlayerNameReq{
-				NickName:        config.GetConfig().Hk4eRobot.NickName,
-			})
-			case cmd.SetPlayerNameRsp:
-				gamename := protoMsg.PayloadMessage.(*proto.SetPlayerNameRsp)
-				if gamename != nil {
-					logger.Info("The nickname of the game has been changed to: %v, account: %v", gamename, account)
-					continue
-				}
-			case cmd.SceneEntityAppearNotify:
-				ntf := protoMsg.PayloadMessage.(*proto.SceneEntityAppearNotify)
-				for _, sceneEntityInfo := range ntf.EntityList {
-					if sceneEntityInfo.EntityType != proto.ProtEntityType_PROT_ENTITY_AVATAR {
-						continue
-					}
-					avatarEntityId = sceneEntityInfo.EntityId
-				}
-			}
-		case <-session.DeadEvent:
-			logger.Info("robot exit, account: %v", account)
-			return
-		}
-	}
+	}, 0)
+	client.Logic(account, session)
 }
